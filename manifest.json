@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "tylersw1ft.conductor",
+  "name": "Conductor",
+  "version": "0.1.0",
+  "author": "TylerSw1ft",
+  "license": "MIT",
+  "description": "Control Hyprland with hand gestures seen by your webcam, tracked locally with MediaPipe",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Conductor",
+    "description": "Hand gestures through the webcam; right-click to switch on or off",
+    "category": "Input",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
