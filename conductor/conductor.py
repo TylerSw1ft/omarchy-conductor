@@ -24,21 +24,31 @@ shell command, and "" turns that gesture off. To use swipe down, give it an
 action, such as 'hl.dsp.workspace.toggle_special("scratchpad")'.
 
 --camera infrared uses the laptop's infrared (face login) camera instead,
-found as the video device that delivers greyscale frames. It sees the same
-in the dark as in daylight; the colour camera needs a lit room. The choice
-can also go in conductor.json as {"camera": "infrared"}.
+found as the video device that delivers greyscale frames, and switches on
+its infrared light, so it sees as well in the dark as in daylight; the
+colour camera needs a lit room. The choice can also go in conductor.json as
+{"camera": "infrared"}.
+
+The light is switched on through Microsoft's standard UVC extension for
+face-login cameras (see IR_* below), which most Windows Hello cameras have.
+In face-login mode the camera lights every other frame, so the unlit ones
+are skipped: about 7.5 usable frames a second.
 
 The camera is released (and its light goes off) while the screen is locked.
 Progress is reported to the Omarchy shell as JSON lines on stdout.
 """
 
 import argparse
+import ctypes
+import fcntl
+import struct
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
+import uuid
 from collections import deque
 
 os.environ.setdefault("GLOG_minloglevel", "2")
@@ -73,6 +83,19 @@ EXIT_SWIPE = 0.07     # a fast hand that leaves the frame (or blurs out) only
                       # needs to have moved this far, sideways: dropping out
                       # of view at the bottom is just putting your hand down
 MIN_GAIN = 4          # camera gain while running, if it was lower
+
+# Microsoft's UVC 1.5 extension for face-login cameras. Control 6 (face
+# authentication) picks the stream mode; mode 2 lights alternate frames with
+# the infrared emitter. Values are 9 bytes: 01 03 <mode> 00 ...
+IR_XU_GUID = uuid.UUID("0f3f95dc-2632-4c4e-92c9-a04782f43bc8").bytes_le
+IR_SELECTOR = 6
+IR_LIT_MODE = 2
+IR_DARK = 12          # frames darker than this are the unlit half
+IR_BLUR = 5 / 360     # blur, as a share of the frame height: under its own
+                      # light a near hand burns out to a flat white shape, and
+                      # the tracker only finds it once the edges are softened
+UVCIOC_CTRL_QUERY = 0xC0107521
+UVC_SET_CUR, UVC_GET_CUR, UVC_GET_MAX = 0x01, 0x81, 0x83
 IDLE_AFTER = 20.0     # no hand for this long: drop to IDLE_FPS
 IDLE_FPS = 5
 LOCK_POLL = 1.0
@@ -182,12 +205,41 @@ def palm_center(landmarks):
     return 1 - sum(p.x for p in pts) / 5, sum(p.y for p in pts) / 5
 
 
+def xu_query(fd, unit, selector, query, data):
+    buf = ctypes.create_string_buffer(bytes(data), len(data))
+    arg = struct.pack("BBBxHxxQ", unit, selector, query, len(data), ctypes.addressof(buf))
+    fcntl.ioctl(fd, UVCIOC_CTRL_QUERY, bytearray(arg))
+    return buf.raw
+
+
+def ir_unit(device):
+    """The extension unit ID carrying Microsoft's face-login controls on this
+    camera, read from its USB descriptors, or None."""
+    sysfs = os.path.realpath(f"/sys/class/video4linux/video{device}/device")
+    try:
+        interface = int(open(os.path.join(sysfs, "bInterfaceNumber")).read(), 16)
+        raw = open(os.path.join(os.path.dirname(sysfs), "descriptors"), "rb").read()
+    except (OSError, ValueError):
+        return None
+    i, current = 0, None
+    while i + 1 < len(raw) and raw[i]:
+        d = raw[i:i + raw[i]]
+        if d[1] == 4:  # interface descriptor
+            current = d[2]
+        elif d[1] == 0x24 and current == interface and len(d) > 20 and d[2] == 6:
+            if d[4:20] == IR_XU_GUID:  # VC extension unit
+                return d[3]
+        i += raw[i]
+    return None
+
+
 class Camera:
     def __init__(self, device, infrared=False):
         self.device = device
         self.infrared = infrared
         self.cap = None
         self.saved = {}
+        self.saved_ir = None  # (unit, original value) while the emitter is on
 
     def v4l2(self, *args):
         try:
@@ -231,19 +283,60 @@ class Camera:
                 cap.release()
                 return False
             self.cap = cap
-            if not self.infrared:
+            if self.infrared:
+                self.light_on()
+            else:
                 self.tune()
         return True
+
+    def light_on(self):
+        unit = ir_unit(self.device)
+        if unit is None:
+            print("conductor: no infrared light control found; using ambient light",
+                  file=sys.stderr)
+            return
+        try:
+            fd = os.open(f"/dev/video{self.device}", os.O_RDWR)
+            try:
+                current = xu_query(fd, unit, IR_SELECTOR, UVC_GET_CUR, [0] * 9)
+                most = xu_query(fd, unit, IR_SELECTOR, UVC_GET_MAX, [0] * 9)
+                if most[2] >= IR_LIT_MODE:
+                    lit = bytes([current[0], current[1], IR_LIT_MODE]) + current[3:]
+                    xu_query(fd, unit, IR_SELECTOR, UVC_SET_CUR, lit)
+                    self.saved_ir = (unit, current)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            print(f"conductor: couldn't switch the infrared light on: {e}", file=sys.stderr)
+
+    def light_off(self):
+        if self.saved_ir is None:
+            return
+        unit, value = self.saved_ir
+        self.saved_ir = None
+        try:
+            fd = os.open(f"/dev/video{self.device}", os.O_RDWR)
+            try:
+                xu_query(fd, unit, IR_SELECTOR, UVC_SET_CUR, value)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
     def read(self):
         ok, frame = self.cap.read()
         if not ok:
             return None
         if frame.ndim == 2:
+            if self.saved_ir and frame.mean() < IR_DARK:
+                return self.read()  # the unlit half of the strobe
+            frame = cv2.GaussianBlur(frame, (0, 0), IR_BLUR * frame.shape[0])
+            frame = cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX)
             frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
         return frame
 
     def close(self):
+        self.light_off()
         if self.cap is not None:
             self.cap.release()
             self.cap = None

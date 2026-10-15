@@ -160,6 +160,19 @@ Panel {
           onClicked: root.service.toggle()
         }
 
+        Toggle {
+          visible: root.installed
+          width: parent.width
+          label: "Infrared camera"
+          description: root.service && root.service.camera === "infrared"
+            ? "Works in the dark · fewer frames"
+            : "Using the colour camera · needs a lit room"
+          checked: root.service ? root.service.camera === "infrared" : false
+          foreground: root.fg
+          fontFamily: root.font
+          onClicked: root.service.setCamera(root.service.camera === "infrared" ? "color" : "infrared")
+        }
+
         PanelSeparator { visible: root.installed; foreground: root.fg }
 
         // ---------- Gesture list ----------

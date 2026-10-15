@@ -20,6 +20,8 @@ Item {
   readonly property string python: dataDir + "/venv/bin/python"
 
   readonly property bool enabled: prefs.enabled
+  // "color" or "infrared": which camera the tracker reads.
+  readonly property string camera: prefs.camera === "infrared" ? "infrared" : "color"
   readonly property bool wanted: enabled && installed
   // installed: the tracker's environment and model exist (checked at start
   // and after setup). setupRunning: tools/setup.sh is running.
@@ -50,6 +52,13 @@ Item {
   function toggle() {
     setEnabled(!prefs.enabled)
   }
+
+  function setCamera(value) {
+    prefs.camera = value === "infrared" ? "infrared" : "color"
+  }
+
+  // Switching cameras restarts the tracker on the new one.
+  onCameraChanged: if (tracker.running) { tracker.running = false; restartTimer.restart() }
 
   // Start or stop the tracker to match `wanted`. Done by hand rather than
   // by binding `running`, since a process that exits resets it.
@@ -112,7 +121,7 @@ Item {
 
   Process {
     id: tracker
-    command: [root.python, root.pluginDir + "/conductor/conductor.py"]
+    command: [root.python, root.pluginDir + "/conductor/conductor.py", "--camera", root.camera]
     stdout: SplitParser { onRead: function(data) { root.handle(data) } }
     onRunningChanged: if (running) { root.state = "starting"; root.error = "" }
     onExited: function(exitCode) {
@@ -142,6 +151,7 @@ Item {
       id: prefs
       // Off until you switch it on: it uses the camera.
       property bool enabled: false
+      property string camera: "color"
     }
   }
 

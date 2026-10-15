@@ -52,6 +52,20 @@ about 500 MB in `~/.local/share/omarchy-conductor/`. You need `python3` and
 
 Conductor starts **off**. Switch it on in the panel, or right-click the icon.
 
+## Infrared camera
+
+Many laptops have an infrared camera for face login, with its own invisible
+light. Switch on **Infrared camera** in the panel to use it: it sees as well
+in the dark as in daylight, though it gives about 7.5 frames a second
+against the colour camera's 30, so in a lit room the colour camera tracks
+better.
+
+Conductor finds the infrared camera by itself (the one that sends greyscale
+frames) and switches its light on through Microsoft's standard UVC
+extension for face-login cameras, which most Windows Hello cameras have. No
+extra tools are needed. The light's previous setting is restored when
+Conductor stops.
+
 ## Privacy and power
 
 - The camera is only open while Conductor is switched on, and the bar icon
