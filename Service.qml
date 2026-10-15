@@ -36,8 +36,8 @@ Item {
 
   // Gestures in display order, with what they do by default.
   readonly property var gestures: [
-    { id: "swipe-left", label: "Sweep left", action: "Previous workspace", icon: "󰁍" },
-    { id: "swipe-right", label: "Sweep right", action: "Next workspace", icon: "󰁔" },
+    { id: "swipe-left", label: "Slap left", action: "Previous workspace", icon: "󰁍" },
+    { id: "swipe-right", label: "Slap right", action: "Next workspace", icon: "󰁔" },
     { id: "swipe-up", label: "Palm, swipe up", action: "Full screen", icon: "󰁝" },
     { id: "thumb-up", label: "Palm, thumb up", action: "Play / pause", icon: "󰔓" },
     { id: "victory", label: "Palm, victory", action: "Next track", icon: "󰒭" }

@@ -230,7 +230,7 @@ Panel {
           width: parent.width
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
-          text: "Sweep an open hand quickly across the view to switch workspace. For the rest, "
+          text: "Slap the air left or right with an open hand to switch workspace. For the rest, "
             + "hold up an open palm until the icon lights, then swipe up or hold a sign. "
             + "Right-click the icon to switch on or off · change actions in ~/.config/omarchy/conductor.json"
           color: root.fg

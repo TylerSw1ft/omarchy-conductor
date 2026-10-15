@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Conductor: drive Hyprland with hand gestures seen by the webcam.
 
-Sweeping an open hand quickly across the view switches workspace on its own,
-no arming needed (see SWEEP_* below):
+A slap (a fast sideways flick of an open hand) switches workspace on its
+own, no arming needed (see SWEEP_* below):
 
-  sweep left / right   previous / next workspace
+  slap left / right    previous / next workspace
 
 Every frame goes through MediaPipe's hand tracker, locally; no image leaves
 this process or touches the disk. The hand's shape is read from the 21 joint
@@ -87,11 +87,14 @@ LOST_GRACE = 0.4      # tolerate the hand vanishing (motion blur) this long
 SWIPE_WINDOW = 0.6    # a swipe has to happen within this many seconds
 SWIPE_X = 0.10        # ...and cover this share of the frame width
 SWIPE_Y = 0.12        # ...or of its height
-# Sweeps: switch workspace without arming. Faster and longer than an armed
-# swipe, with an open hand, so reaching for something doesn't count.
-SWEEP_WINDOW = 0.45   # the sweep has to happen within this many seconds
-SWEEP_X = 0.22        # ...and cover this share of the frame width
-SWEEP_EXIT = 0.12     # ...or this much before the hand leaves the frame
+# Slaps: switch workspace without arming. A slap is short and fast, and the
+# hand often blurs out of tracking halfway, so it's judged on speed: an open
+# hand that moves sideways fast, or vanishes while doing so. Reaching for
+# something is slower, and usually not with an open hand.
+SWEEP_WINDOW = 0.3    # the slap has to happen within this many seconds
+SWEEP_X = 0.15        # ...and cover this share of the frame width
+SWEEP_EXIT = 0.04     # ...or this much before the hand vanishes
+SWEEP_SPEED = 0.5     # ...moving at least this many frame widths a second
 SWEEP_OPEN = 0.6      # an open palm must have been seen this recently
 SWEEP_RETURN = 1.0    # ignore the opposite swipe this long after one: it's
                       # just your hand coming back
@@ -401,13 +404,19 @@ class Conductor:
         self.sweep_track.clear()
 
     def sweep(self, now, threshold):
-        """A fast sideways sweep of an open hand, unarmed, if there was one."""
+        """A slap: a fast sideways flick of an open hand, unarmed."""
         recent = [p for p in self.sweep_track if now - p[0] <= SWEEP_WINDOW]
         if len(recent) < 2 or now - self.palm_seen > SWEEP_OPEN:
             return None
         (_, x0, y0), (_, x, y) = recent[0], recent[-1]
         dx, dy = x - x0, y - y0
-        if abs(dx) < threshold or abs(dx) < 2 * abs(dy):
+        # Slaps swing in an arc, so allow some vertical travel.
+        if abs(dx) < threshold or abs(dx) < 1.2 * abs(dy):
+            return None
+        # Still moving fast at the end, in the same direction.
+        (ta, xa, _), (tb, xb, _) = recent[-2], recent[-1]
+        speed = (xb - xa) / max(tb - ta, 1e-3)
+        if abs(speed) < SWEEP_SPEED or (speed > 0) != (dx > 0):
             return None
         gesture = "swipe-right" if dx > 0 else "swipe-left"
         if not self.actions.get(gesture) or self.blocked(now, gesture):

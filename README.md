@@ -1,15 +1,17 @@
 # Conductor
 
-Control Hyprland with your hands: sweep an open hand across your webcam's
-view to switch workspace, or hold up a palm and then swipe up or make a sign. Hand tracking runs locally with Google's MediaPipe; no
+Control Hyprland with your hands: slap the air left or right to switch
+workspace, or hold up a palm and then swipe up or make a sign. Hand tracking runs locally with Google's MediaPipe; no
 image leaves your computer or is written to disk.
 
 ## Gestures
 
-**Sweep an open hand quickly across the view** to switch workspace. It has
-to be fast (a quarter of the view in under half a second), mostly sideways,
-and with an open hand, so reaching for a mug or typing doesn't count.
-Bringing your hand back afterwards is ignored for a second.
+**Slap the air left or right** with an open hand to switch workspace. It's
+judged on speed: a short, fast sideways flick counts even when the hand
+blurs out of tracking halfway, while reaching for a mug, typing or putting
+your hand down doesn't. Bringing your hand back afterwards is ignored for a
+second, and slaps a moment apart each count. The colour camera, at 30 frames
+a second, catches slaps better than the infrared one.
 
 Everything else starts with **an open palm held up for a moment**. That arms
 Conductor (the bar icon lights up); one gesture then fires and disarms it
@@ -17,7 +19,7 @@ again. Swiping left or right while armed works too.
 
 | Gesture | Action |
 |---|---|
-| Sweep left / right | Previous / next workspace |
+| Slap left / right | Previous / next workspace |
 | Palm, then swipe up | Full screen |
 | Palm, then thumb up (hold) | Play / pause |
 | Palm, then victory sign (hold) | Next track |
