@@ -23,6 +23,11 @@ A value starting with "hl." is a Hyprland dispatcher, anything else runs as a
 shell command, and "" turns that gesture off. To use swipe down, give it an
 action, such as 'hl.dsp.workspace.toggle_special("scratchpad")'.
 
+--camera infrared uses the laptop's infrared (face login) camera instead,
+found as the video device that delivers greyscale frames. It sees the same
+in the dark as in daylight; the colour camera needs a lit room. The choice
+can also go in conductor.json as {"camera": "infrared"}.
+
 The camera is released (and its light goes off) while the screen is locked.
 Progress is reported to the Omarchy shell as JSON lines on stdout.
 """
@@ -77,17 +82,42 @@ def emit(**event):
     print(json.dumps(event), flush=True)
 
 
-def load_actions(path):
-    actions = dict(DEFAULT_ACTIONS)
+def load_config(path):
     try:
         with open(path) as f:
-            user = json.load(f).get("actions", {})
-        actions.update({k: str(v) for k, v in user.items() if k in DEFAULT_ACTIONS})
+            config = json.load(f)
+        if isinstance(config, dict):
+            return config
+        raise ValueError("not a JSON object")
     except FileNotFoundError:
         pass
-    except (OSError, ValueError, AttributeError) as e:
+    except (OSError, ValueError) as e:
         print(f"conductor: ignoring {path}: {e}", file=sys.stderr)
+    return {}
+
+
+def load_actions(config):
+    actions = dict(DEFAULT_ACTIONS)
+    user = config.get("actions", {})
+    if isinstance(user, dict):
+        actions.update({k: str(v) for k, v in user.items() if k in DEFAULT_ACTIONS})
     return actions
+
+
+def find_infrared():
+    """The first video device that delivers 8-bit greyscale frames: on
+    laptops, that's the infrared camera used for face login."""
+    for name in sorted(os.listdir("/dev"), key=lambda n: (len(n), n)):
+        if not name.startswith("video"):
+            continue
+        try:
+            formats = subprocess.run(["v4l2-ctl", "-d", f"/dev/{name}", "--list-formats"],
+                                     capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if "'GREY'" in formats:
+            return int(name[5:])
+    return None
 
 
 def run(action, dry_run):
@@ -153,8 +183,9 @@ def palm_center(landmarks):
 
 
 class Camera:
-    def __init__(self, device):
+    def __init__(self, device, infrared=False):
         self.device = device
+        self.infrared = infrared
         self.cap = None
         self.saved = {}
 
@@ -187,20 +218,30 @@ class Camera:
     def open(self):
         if self.cap is None:
             cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 30)
+            if self.infrared:
+                # Greyscale frames as they come; the camera lights the scene
+                # itself, so there's nothing to tune.
+                cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+            else:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 30)
             if not cap.isOpened():
                 cap.release()
                 return False
             self.cap = cap
-            self.tune()
+            if not self.infrared:
+                self.tune()
         return True
 
     def read(self):
         ok, frame = self.cap.read()
-        return frame if ok else None
+        if not ok:
+            return None
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        return frame
 
     def close(self):
         if self.cap is not None:
@@ -319,12 +360,22 @@ def main():
     config = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                           "omarchy", "conductor.json")
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--device", type=int, default=0, help="video device number (default 0)")
+    p.add_argument("--camera", choices=["color", "infrared"],
+                   help="which camera to use (default: conductor.json's \"camera\", else color)")
+    p.add_argument("--device", type=int, help="video device number, overriding --camera")
     p.add_argument("--model", default=os.path.join(data, "gesture_recognizer.task"))
     p.add_argument("--config", default=config)
     p.add_argument("--dry-run", action="store_true", help="report gestures without acting")
     p.add_argument("--debug", action="store_true", help="print what is seen in every frame to stderr")
     args = p.parse_args()
+
+    config = load_config(args.config)
+    infrared = (args.camera or config.get("camera")) == "infrared"
+    if args.device is None:
+        args.device = find_infrared() if infrared else 0
+        if args.device is None:
+            emit(event="error", message="no infrared camera found")
+            return 1
 
     if not os.path.exists(args.model):
         emit(event="error", message=f"model missing: run {os.path.join(here, '..', 'tools', 'setup.sh')}")
@@ -338,11 +389,11 @@ def main():
         min_hand_presence_confidence=0.4,
         min_tracking_confidence=0.5,
     ))
-    camera = Camera(args.device)
+    camera = Camera(args.device, infrared)
     # The shell stops us with SIGTERM: exit through `finally` so the camera's
     # settings are put back.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    conductor = Conductor(load_actions(args.config), args.dry_run)
+    conductor = Conductor(load_actions(config), args.dry_run)
     start = time.monotonic()
     last_ts = -1
     lock_checked = 0.0
