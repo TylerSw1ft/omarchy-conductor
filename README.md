@@ -15,18 +15,19 @@ so bringing your hand back after a swipe can't trigger the opposite swipe.
 |---|---|
 | Swipe left / right | Previous / next workspace |
 | Swipe up | Full screen |
-| Swipe down | Scratchpad |
 | Thumb up (hold) | Play / pause |
 | Victory sign (hold) | Next track |
 
-Directions are as you see them. Arming times out after 2.5 seconds.
+Directions are as you see them. Arming times out after 4 seconds. Swipe
+down is off by default, since it's also how you put your hand down; give it
+an action below to use it.
 
 To change what a gesture does, create `~/.config/omarchy/conductor.json`:
 
 ```json
 {
   "actions": {
-    "swipe-down": "",
+    "swipe-down": "hl.dsp.workspace.toggle_special(\"scratchpad\")",
     "victory": "omarchy-shell media previous",
     "swipe-up": "hl.dsp.window.fullscreen({ mode = \"maximized\" })"
   }

@@ -37,7 +37,6 @@ Item {
     { id: "swipe-left", label: "Swipe left", action: "Previous workspace", icon: "󰁍" },
     { id: "swipe-right", label: "Swipe right", action: "Next workspace", icon: "󰁔" },
     { id: "swipe-up", label: "Swipe up", action: "Full screen", icon: "󰁝" },
-    { id: "swipe-down", label: "Swipe down", action: "Scratchpad", icon: "󰁅" },
     { id: "thumb-up", label: "Thumb up", action: "Play / pause", icon: "󰔓" },
     { id: "victory", label: "Victory sign", action: "Next track", icon: "󰒭" }
   ]

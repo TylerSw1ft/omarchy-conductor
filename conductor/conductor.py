@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Conductor: drive Hyprland with hand gestures seen by the webcam.
 
-Every frame goes through MediaPipe's gesture recognizer, locally; no image
-leaves this process or touches the disk. Nothing happens until you arm it by
+Every frame goes through MediaPipe's hand tracker, locally; no image leaves
+this process or touches the disk. The hand's shape is read from the 21 joint
+positions it reports, which hold up far better in dim light and at odd angles
+than MediaPipe's own gesture classifier. Nothing happens until you arm it by
 holding up an open palm. While armed, one gesture fires an action and
 disarms again, so bringing your hand back after a swipe can't trigger the
 opposite swipe:
 
   swipe left / right   previous / next workspace
   swipe up             toggle fullscreen
-  swipe down           toggle the scratchpad
   thumb up (hold)      play / pause
   victory (hold)       next track
 
-Directions are as you see them: the camera image is mirrored first.
+Directions are as you see them: the camera image is mirrored first. Swipe
+down is off by default, since it's also how you put your hand down.
 
 Actions can be overridden in ~/.config/omarchy/conductor.json, e.g.
   {"actions": {"swipe-down": "", "victory": "omarchy-shell media previous"}}
 A value starting with "hl." is a Hyprland dispatcher, anything else runs as a
-shell command, and "" turns that gesture off.
+shell command, and "" turns that gesture off. To use swipe down, give it an
+action, such as 'hl.dsp.workspace.toggle_special("scratchpad")'.
 
 The camera is released (and its light goes off) while the screen is locked.
 Progress is reported to the Omarchy shell as JSON lines on stdout.
@@ -27,6 +30,7 @@ Progress is reported to the Omarchy shell as JSON lines on stdout.
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -43,22 +47,27 @@ DEFAULT_ACTIONS = {
     "swipe-left": 'hl.dsp.focus({ workspace = "e-1" })',
     "swipe-right": 'hl.dsp.focus({ workspace = "e+1" })',
     "swipe-up": 'hl.dsp.window.fullscreen({ mode = "fullscreen" })',
-    "swipe-down": 'hl.dsp.workspace.toggle_special("scratchpad")',
+    "swipe-down": "",
     "thumb-up": "omarchy-shell media playPause",
     "victory": "omarchy-shell media next",
 }
 
-# Recognizer labels for the hold gestures.
-POSES = {"Thumb_Up": "thumb-up", "Victory": "victory"}
+# Hand shapes (see hand_pose) that fire when held.
+POSES = {"thumb-up": "thumb-up", "victory": "victory"}
 
 ARM_HOLD = 0.3        # seconds of open palm to arm
 POSE_HOLD = 0.45      # seconds a hold gesture must be held
-ARMED_TIMEOUT = 2.5   # disarm if nothing happens for this long
+POSE_SHARE = 0.6      # share of frames in a hold that must show the pose;
+                      # the shape reading flickers, especially in dim light
+ARMED_TIMEOUT = 4.0   # disarm if nothing happens for this long
 LOST_GRACE = 0.4      # tolerate the hand vanishing (motion blur) this long
-MIN_SCORE = 0.6       # recognizer confidence for a pose to count
-SWIPE_WINDOW = 0.45   # a swipe has to happen within this many seconds
-SWIPE_X = 0.20        # ...and cover this share of the frame width
-SWIPE_Y = 0.18        # ...or of its height
+SWIPE_WINDOW = 0.6    # a swipe has to happen within this many seconds
+SWIPE_X = 0.10        # ...and cover this share of the frame width
+SWIPE_Y = 0.12        # ...or of its height
+EXIT_SWIPE = 0.07     # a fast hand that leaves the frame (or blurs out) only
+                      # needs to have moved this far, sideways: dropping out
+                      # of view at the bottom is just putting your hand down
+MIN_GAIN = 4          # camera gain while running, if it was lower
 IDLE_AFTER = 20.0     # no hand for this long: drop to IDLE_FPS
 IDLE_FPS = 5
 LOCK_POLL = 1.0
@@ -98,6 +107,44 @@ def screen_locked():
     return subprocess.run(["pgrep", "-x", "hyprlock"], stdout=subprocess.DEVNULL).returncode == 0
 
 
+def dist(a, b):
+    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2) ** 0.5
+
+
+def hand_pose(lm, image_lm):
+    """Name the hand's shape: "palm", "thumb-up", "victory", "fist" or None.
+
+    lm are the joints in 3D (metres, around the hand's centre), so a finger
+    pointing a little towards the camera still reads as straight. A finger is
+    out when its tip is well past its middle joint, measured from the wrist,
+    so it works at any size or angle. "Up" for the thumb comes from the image
+    (image_lm), where y grows downwards."""
+    wrist = lm[0]
+
+    def out(tip, pip):
+        return dist(wrist, lm[tip]) > 1.1 * dist(wrist, lm[pip])
+
+    def curled(tip, pip):
+        return dist(wrist, lm[tip]) < 1.0 * dist(wrist, lm[pip])
+
+    fingers = [(8, 6), (12, 10), (16, 14), (20, 18)]  # index .. pinky
+    extended = [out(*f) for f in fingers]
+    folded = [curled(*f) for f in fingers]
+    palm_size = dist(wrist, lm[9])
+    thumb_out = dist(lm[4], lm[5]) > 0.6 * palm_size
+
+    if all(extended):
+        return "palm"
+    if extended[0] and extended[1] and folded[2] and folded[3]:
+        return "victory"
+    image_palm = ((image_lm[0].x - image_lm[9].x) ** 2 + (image_lm[0].y - image_lm[9].y) ** 2) ** 0.5
+    if all(folded) and thumb_out and image_lm[4].y < image_lm[5].y - 0.25 * image_palm:
+        return "thumb-up"
+    if all(folded):
+        return "fist"
+    return None
+
+
 def palm_center(landmarks):
     # Wrist and the four knuckles: steadier than any fingertip. Mirrored, so
     # moving your hand to your right moves it right here too.
@@ -109,6 +156,33 @@ class Camera:
     def __init__(self, device):
         self.device = device
         self.cap = None
+        self.saved = {}
+
+    def v4l2(self, *args):
+        try:
+            return subprocess.run(["v4l2-ctl", "-d", f"/dev/video{self.device}", *args],
+                                  capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def control(self, name):
+        got = self.v4l2("-C", name)
+        if got and got.returncode == 0 and ":" in got.stdout:
+            return got.stdout.split(":")[1].strip()
+        return None
+
+    def tune(self):
+        # In dim light the camera stretches its exposure and drops to ~15 fps,
+        # which blurs a swipe into nothing. Hold it at 30 fps and make up the
+        # light with gain while we run; settings go back when we let go.
+        dynamic = self.control("exposure_dynamic_framerate")
+        if dynamic is not None:
+            self.saved["exposure_dynamic_framerate"] = dynamic
+            self.v4l2("-c", "exposure_dynamic_framerate=0")
+        gain = self.control("gain")
+        if gain is not None and gain.lstrip("-").isdigit() and int(gain) < MIN_GAIN:
+            self.saved["gain"] = gain
+            self.v4l2("-c", f"gain={MIN_GAIN}")
 
     def open(self):
         if self.cap is None:
@@ -121,6 +195,7 @@ class Camera:
                 cap.release()
                 return False
             self.cap = cap
+            self.tune()
         return True
 
     def read(self):
@@ -131,6 +206,9 @@ class Camera:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        for name, value in self.saved.items():
+            self.v4l2("-c", f"{name}={value}")
+        self.saved = {}
 
 
 class Conductor:
@@ -139,11 +217,10 @@ class Conductor:
         self.dry_run = dry_run
         self.state = None
         self.armed_at = 0.0
-        self.palm_since = None
-        self.pose = None
-        self.pose_since = 0.0
         self.last_seen = 0.0
         self.track = deque()
+        self.lost_since = None
+        self.poses = deque()  # (time, pose) for recent frames
 
     def set_state(self, state):
         if state != self.state:
@@ -158,27 +235,57 @@ class Conductor:
 
     def disarm(self):
         self.armed_at = 0.0
-        self.palm_since = None
-        self.pose = None
         self.track.clear()
+        self.poses.clear()
 
-    def update(self, now, label, score, landmarks):
+    def held(self, now, pose, seconds):
+        """Whether `pose` has dominated the last `seconds`, which must be
+        fully covered by frames seen since the pose was first spotted."""
+        recent = [p for t, p in self.poses if now - t <= seconds]
+        if len(recent) < 3 or now - self.poses[0][0] < seconds * 0.9:
+            return False
+        return recent.count(pose) >= POSE_SHARE * len(recent)
+
+    def swipe(self, now, threshold_x, threshold_y=None):
+        """The swipe the palm made within SWIPE_WINDOW, if it went far enough."""
+        recent = [p for p in self.track if now - p[0] <= SWIPE_WINDOW]
+        if len(recent) < 2:
+            return None
+        (_, x0, y0), (_, x, y) = recent[0], recent[-1]
+        dx, dy = x - x0, y - y0
+        gesture = None
+        if abs(dx) >= threshold_x and abs(dx) > 1.5 * abs(dy):
+            gesture = "swipe-right" if dx > 0 else "swipe-left"
+        elif threshold_y is not None and abs(dy) >= threshold_y and abs(dy) > 1.5 * abs(dx):
+            gesture = "swipe-down" if dy > 0 else "swipe-up"
+        # A gesture with no action isn't watched for at all, so it can't use
+        # up the arming meant for another one.
+        return gesture if self.actions.get(gesture) else None
+
+    def update(self, now, pose, landmarks):
         if landmarks is None:
+            if self.armed_at and self.lost_since is None:
+                # A quick swipe often ends with the hand blurring out or
+                # leaving the frame: judge it on the way it was heading.
+                self.lost_since = now
+                gesture = self.swipe(now, EXIT_SWIPE)
+                if gesture:
+                    return self.fire(gesture)
             if now - self.last_seen > LOST_GRACE:
                 self.disarm()
                 self.set_state("watching")
             return
         self.last_seen = now
-        confident = label if score >= MIN_SCORE else None
+        self.lost_since = None
+        self.poses.append((now, pose))
+        while self.poses and now - self.poses[0][0] > max(ARM_HOLD, POSE_HOLD) + 0.1:
+            self.poses.popleft()
 
         if not self.armed_at:
-            if confident == "Open_Palm":
-                self.palm_since = self.palm_since or now
-                if now - self.palm_since >= ARM_HOLD:
-                    self.armed_at = now
-                    self.track.clear()
-            else:
-                self.palm_since = None
+            if self.held(now, "palm", ARM_HOLD):
+                self.armed_at = now
+                self.track.clear()
+                self.poses.clear()
             self.set_state("armed" if self.armed_at else "hand")
             return
 
@@ -193,19 +300,16 @@ class Conductor:
         self.track.append((now, x, y))
         while self.track and now - self.track[0][0] > SWIPE_WINDOW:
             self.track.popleft()
-        _, x0, y0 = self.track[0]
-        dx, dy = x - x0, y - y0
-        if abs(dx) >= SWIPE_X and abs(dx) > 2 * abs(dy):
-            return self.fire("swipe-right" if dx > 0 else "swipe-left")
-        if abs(dy) >= SWIPE_Y and abs(dy) > 2 * abs(dx):
-            return self.fire("swipe-down" if dy > 0 else "swipe-up")
+        # Making a sign shifts the hand a little; that's not a swipe.
+        if pose not in POSES:
+            gesture = self.swipe(now, SWIPE_X, SWIPE_Y)
+            if gesture:
+                return self.fire(gesture)
 
-        # Holds: the same pose for POSE_HOLD.
-        pose = POSES.get(confident)
-        if pose != self.pose:
-            self.pose, self.pose_since = pose, now
-        elif pose and now - self.pose_since >= POSE_HOLD:
-            self.fire(pose)
+        # Holds: mostly the same pose for POSE_HOLD.
+        for shape, gesture in POSES.items():
+            if self.actions.get(gesture) and self.held(now, shape, POSE_HOLD):
+                return self.fire(gesture)
 
 
 def main():
@@ -219,6 +323,7 @@ def main():
     p.add_argument("--model", default=os.path.join(data, "gesture_recognizer.task"))
     p.add_argument("--config", default=config)
     p.add_argument("--dry-run", action="store_true", help="report gestures without acting")
+    p.add_argument("--debug", action="store_true", help="print what is seen in every frame to stderr")
     args = p.parse_args()
 
     if not os.path.exists(args.model):
@@ -229,11 +334,14 @@ def main():
         base_options=BaseOptions(model_asset_path=args.model),
         running_mode=vision.RunningMode.VIDEO,
         num_hands=1,
-        min_hand_detection_confidence=0.6,
-        min_hand_presence_confidence=0.5,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.4,
         min_tracking_confidence=0.5,
     ))
     camera = Camera(args.device)
+    # The shell stops us with SIGTERM: exit through `finally` so the camera's
+    # settings are put back.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     conductor = Conductor(load_actions(args.config), args.dry_run)
     start = time.monotonic()
     last_ts = -1
@@ -268,15 +376,25 @@ def main():
             # VIDEO mode needs strictly increasing timestamps.
             ts = max(last_ts + 1, int((now - start) * 1000))
             last_ts = ts
+            # Crop to the centre square: the tracker assumes a square, and
+            # cropping (unlike padding) keeps the hand as big as possible.
+            # A swipe that runs off the side still counts (EXIT_SWIPE).
+            h, w = frame.shape[:2]
+            side = min(w, h)
+            y0, x0 = (h - side) // 2, (w - side) // 2
+            frame = frame[y0:y0 + side, x0:x0 + side]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = recognizer.recognize_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts)
 
-            if result.hand_landmarks:
-                top = result.gestures[0][0] if result.gestures and result.gestures[0] else None
-                conductor.update(now, top.category_name if top else None, top.score if top else 0.0,
-                                 result.hand_landmarks[0])
-            else:
-                conductor.update(now, None, 0.0, None)
+            landmarks = result.hand_landmarks[0] if result.hand_landmarks else None
+            world = result.hand_world_landmarks[0] if result.hand_world_landmarks else None
+            pose = hand_pose(world, landmarks) if landmarks and world else None
+            if args.debug:
+                pc = palm_center(landmarks) if landmarks else None
+                print(f"{now - start:7.2f} light={frame.mean():5.1f} hand={'yes' if pc else 'no '} "
+                      f"pose={pose or '-':9} palm={f'{pc[0]:.2f},{pc[1]:.2f}' if pc else '-':10} "
+                      f"state={conductor.state}", file=sys.stderr, flush=True)
+            conductor.update(now, pose, landmarks)
     except KeyboardInterrupt:
         pass
     finally:
