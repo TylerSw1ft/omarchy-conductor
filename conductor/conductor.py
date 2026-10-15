@@ -59,8 +59,11 @@ import mediapipe as mp  # noqa: E402
 from mediapipe.tasks.python import BaseOptions, vision  # noqa: E402
 
 DEFAULT_ACTIONS = {
-    "swipe-left": 'hl.dsp.focus({ workspace = "e-1" })',
-    "swipe-right": 'hl.dsp.focus({ workspace = "e+1" })',
+    # r±1, not e±1: the next numbered workspace, even an empty one, as a
+    # touchpad swipe does; e±1 only visits ones with windows, so with one
+    # workspace open it did nothing.
+    "swipe-left": 'hl.dsp.focus({ workspace = "r-1" })',
+    "swipe-right": 'hl.dsp.focus({ workspace = "r+1" })',
     "swipe-up": 'hl.dsp.window.fullscreen({ mode = "fullscreen" })',
     "swipe-down": "",
     "thumb-up": "omarchy-shell media playPause",
