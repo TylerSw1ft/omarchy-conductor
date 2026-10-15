@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Conductor: drive Hyprland with hand gestures seen by the webcam.
 
+Sweeping an open hand quickly across the view switches workspace on its own,
+no arming needed (see SWEEP_* below):
+
+  sweep left / right   previous / next workspace
+
 Every frame goes through MediaPipe's hand tracker, locally; no image leaves
 this process or touches the disk. The hand's shape is read from the 21 joint
 positions it reports, which hold up far better in dim light and at odd angles
@@ -82,6 +87,15 @@ LOST_GRACE = 0.4      # tolerate the hand vanishing (motion blur) this long
 SWIPE_WINDOW = 0.6    # a swipe has to happen within this many seconds
 SWIPE_X = 0.10        # ...and cover this share of the frame width
 SWIPE_Y = 0.12        # ...or of its height
+# Sweeps: switch workspace without arming. Faster and longer than an armed
+# swipe, with an open hand, so reaching for something doesn't count.
+SWEEP_WINDOW = 0.45   # the sweep has to happen within this many seconds
+SWEEP_X = 0.22        # ...and cover this share of the frame width
+SWEEP_EXIT = 0.12     # ...or this much before the hand leaves the frame
+SWEEP_OPEN = 0.6      # an open palm must have been seen this recently
+SWEEP_RETURN = 1.0    # ignore the opposite swipe this long after one: it's
+                      # just your hand coming back
+SWIPE_COOLDOWN = 0.6  # and the same one this long: it's the same movement
 EXIT_SWIPE = 0.07     # a fast hand that leaves the frame (or blurs out) only
                       # needs to have moved this far, sideways: dropping out
                       # of view at the bottom is just putting your hand down
@@ -358,17 +372,47 @@ class Conductor:
         self.track = deque()
         self.lost_since = None
         self.poses = deque()  # (time, pose) for recent frames
+        self.sweep_track = deque()  # (time, x, y) while not armed
+        self.palm_seen = -1e9
+        self.last_sweep = (-1e9, None)
 
     def set_state(self, state):
         if state != self.state:
             self.state = state
             emit(event="state", state=state)
 
-    def fire(self, gesture):
+    def blocked(self, now, gesture):
+        """Whether a swipe is just the tail or the return of the last one."""
+        when, previous = self.last_sweep
+        if previous is None:
+            return False
+        if previous == gesture:
+            return now - when < SWIPE_COOLDOWN
+        return now - when < SWEEP_RETURN
+
+    def fire(self, gesture, now=None):
+        if gesture.startswith("swipe"):
+            if now is not None:
+                self.last_sweep = (now, gesture)
         action = self.actions.get(gesture, "")
         emit(event="gesture", gesture=gesture, action=action)
         run(action, self.dry_run)
         self.disarm()
+        self.sweep_track.clear()
+
+    def sweep(self, now, threshold):
+        """A fast sideways sweep of an open hand, unarmed, if there was one."""
+        recent = [p for p in self.sweep_track if now - p[0] <= SWEEP_WINDOW]
+        if len(recent) < 2 or now - self.palm_seen > SWEEP_OPEN:
+            return None
+        (_, x0, y0), (_, x, y) = recent[0], recent[-1]
+        dx, dy = x - x0, y - y0
+        if abs(dx) < threshold or abs(dx) < 2 * abs(dy):
+            return None
+        gesture = "swipe-right" if dx > 0 else "swipe-left"
+        if not self.actions.get(gesture) or self.blocked(now, gesture):
+            return None
+        return gesture
 
     def disarm(self):
         self.armed_at = 0.0
@@ -400,14 +444,20 @@ class Conductor:
         return gesture if self.actions.get(gesture) else None
 
     def update(self, now, pose, landmarks):
+        if landmarks is None and self.sweep_track and not self.armed_at:
+            # A sweep often carries the hand out of the frame.
+            gesture = self.sweep(now, SWEEP_EXIT)
+            self.sweep_track.clear()
+            if gesture:
+                return self.fire(gesture, now)
         if landmarks is None:
             if self.armed_at and self.lost_since is None:
                 # A quick swipe often ends with the hand blurring out or
                 # leaving the frame: judge it on the way it was heading.
                 self.lost_since = now
                 gesture = self.swipe(now, EXIT_SWIPE)
-                if gesture:
-                    return self.fire(gesture)
+                if gesture and not self.blocked(now, gesture):
+                    return self.fire(gesture, now)
             if now - self.last_seen > LOST_GRACE:
                 self.disarm()
                 self.set_state("watching")
@@ -418,7 +468,17 @@ class Conductor:
         while self.poses and now - self.poses[0][0] > max(ARM_HOLD, POSE_HOLD) + 0.1:
             self.poses.popleft()
 
+        if pose == "palm":
+            self.palm_seen = now
+
         if not self.armed_at:
+            x, y = palm_center(landmarks)
+            self.sweep_track.append((now, x, y))
+            while self.sweep_track and now - self.sweep_track[0][0] > SWEEP_WINDOW:
+                self.sweep_track.popleft()
+            gesture = self.sweep(now, SWEEP_X)
+            if gesture:
+                return self.fire(gesture, now)
             if self.held(now, "palm", ARM_HOLD):
                 self.armed_at = now
                 self.track.clear()
@@ -440,8 +500,8 @@ class Conductor:
         # Making a sign shifts the hand a little; that's not a swipe.
         if pose not in POSES:
             gesture = self.swipe(now, SWIPE_X, SWIPE_Y)
-            if gesture:
-                return self.fire(gesture)
+            if gesture and not self.blocked(now, gesture):
+                return self.fire(gesture, now)
 
         # Holds: mostly the same pose for POSE_HOLD.
         for shape, gesture in POSES.items():

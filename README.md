@@ -1,22 +1,26 @@
 # Conductor
 
-Control Hyprland with your hands: hold up an open palm to your webcam, then
-swipe or make a sign. Hand tracking runs locally with Google's MediaPipe; no
+Control Hyprland with your hands: sweep an open hand across your webcam's
+view to switch workspace, or hold up a palm and then swipe up or make a sign. Hand tracking runs locally with Google's MediaPipe; no
 image leaves your computer or is written to disk.
 
 ## Gestures
 
-Every gesture starts with **an open palm held up for a moment**. That arms
-Conductor (the bar icon lights up), so typing, scratching your head or
-waving at someone does nothing. One gesture then fires and disarms it again,
-so bringing your hand back after a swipe can't trigger the opposite swipe.
+**Sweep an open hand quickly across the view** to switch workspace. It has
+to be fast (a quarter of the view in under half a second), mostly sideways,
+and with an open hand, so reaching for a mug or typing doesn't count.
+Bringing your hand back afterwards is ignored for a second.
+
+Everything else starts with **an open palm held up for a moment**. That arms
+Conductor (the bar icon lights up); one gesture then fires and disarms it
+again. Swiping left or right while armed works too.
 
 | Gesture | Action |
 |---|---|
-| Swipe left / right | Previous / next workspace |
-| Swipe up | Full screen |
-| Thumb up (hold) | Play / pause |
-| Victory sign (hold) | Next track |
+| Sweep left / right | Previous / next workspace |
+| Palm, then swipe up | Full screen |
+| Palm, then thumb up (hold) | Play / pause |
+| Palm, then victory sign (hold) | Next track |
 
 Directions are as you see them. Arming times out after 4 seconds. Swipe
 down is off by default, since it's also how you put your hand down; give it

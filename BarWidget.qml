@@ -182,7 +182,7 @@ Panel {
           opacity: root.on ? 1.0 : 0.5
 
           PanelSectionHeader {
-            text: "HOLD UP AN OPEN PALM, THEN"
+            text: "GESTURES"
             foreground: root.fg
             fontFamily: root.font
           }
@@ -230,8 +230,9 @@ Panel {
           width: parent.width
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
-          text: "Signs are held for half a second. Right-click the icon to switch on or off · "
-            + "change actions in ~/.config/omarchy/conductor.json"
+          text: "Sweep an open hand quickly across the view to switch workspace. For the rest, "
+            + "hold up an open palm until the icon lights, then swipe up or hold a sign. "
+            + "Right-click the icon to switch on or off · change actions in ~/.config/omarchy/conductor.json"
           color: root.fg
           opacity: 0.5
           font.family: root.font
